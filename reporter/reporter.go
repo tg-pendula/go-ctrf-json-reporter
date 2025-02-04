@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ctrf-io/go-ctrf-json-reporter/ctrf"
+	"github.com/tg-pendula/go-ctrf-json-reporter/ctrf"
 )
 
 type TestEvent struct {

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,6 +20,32 @@ type TestEvent struct {
 	Test    string
 	Elapsed float64
 	Output  string
+}
+
+var coverageRegex *regexp.Regexp = regexp.MustCompile(`coverage: (\d+\.\d+)`)
+
+type suiteCoverage struct {
+	Suite    string  `json:"suite"`
+	Coverage float32 `json:"coverage"`
+}
+
+func getCoverage(event TestEvent) (*suiteCoverage, error) {
+	if subMatches := coverageRegex.FindAllStringSubmatch(event.Output, 1); len(subMatches) > 0 && len(subMatches[0]) == 2 {
+		// the first subMatch will be: ["coverage: 94.1", "94.1"] (we can always expect 2 items)
+
+		f, err := strconv.ParseFloat(subMatches[0][1], 32)
+
+		if err != nil {
+			return nil, fmt.Errorf("error parsing coverage: %w", err)
+		}
+
+		return &suiteCoverage{
+			Suite:    event.Package,
+			Coverage: float32(f),
+		}, nil
+	}
+
+	return nil, nil
 }
 
 func ParseTestResults(r io.Reader, verbose bool, env *ctrf.Environment) (*ctrf.Report, error) {
@@ -36,6 +64,10 @@ func ParseTestResults(r io.Reader, verbose bool, env *ctrf.Environment) (*ctrf.R
 
 	report := ctrf.NewReport("gotest", env)
 	report.Results.Summary.Start = time.Now().UnixNano() / int64(time.Millisecond)
+
+	// Coverage is reported twice when tests exist for a package, but only once when no tests exist, so use a map to collect unique results
+	coverage := map[string]suiteCoverage{}
+
 	for i, event := range testEvents {
 		if verbose {
 			jsonEvent, err := json.Marshal(event)
@@ -44,9 +76,7 @@ func ParseTestResults(r io.Reader, verbose bool, env *ctrf.Environment) (*ctrf.R
 			}
 			fmt.Println(string(jsonEvent))
 		}
-		if event.Test == "" {
-			continue
-		}
+
 		startTime, err := parseTimeString(event.Time)
 		duration := secondsToMillis(event.Elapsed)
 		if err != nil {
@@ -60,37 +90,65 @@ func ParseTestResults(r io.Reader, verbose bool, env *ctrf.Environment) (*ctrf.R
 				report.Results.Summary.Stop = endTime
 			}
 		}
-		if event.Action == "pass" {
-			report.Results.Summary.Tests++
-			report.Results.Summary.Passed++
-			report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
-				Suite:    event.Package,
-				Name:     event.Test,
-				Status:   ctrf.TestPassed,
-				Duration: duration,
-			})
-		} else if event.Action == "fail" {
-			report.Results.Summary.Tests++
-			report.Results.Summary.Failed++
-			report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
-				Suite:    event.Package,
-				Name:     event.Test,
-				Status:   ctrf.TestFailed,
-				Duration: duration,
-				Message:  getMessagesForTest(testEvents, i, event.Package, event.Test),
-			})
-		} else if event.Action == "skip" {
-			report.Results.Summary.Tests++
-			report.Results.Summary.Skipped++
-			report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
-				Suite:    event.Package,
-				Name:     event.Test,
-				Status:   ctrf.TestSkipped,
-				Duration: duration,
-			})
+
+		// Events relating to a specific Test
+		if len(event.Test) > 0 {
+			if event.Action == "pass" {
+				report.Results.Summary.Tests++
+				report.Results.Summary.Passed++
+				report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
+					Suite:    event.Package,
+					Name:     event.Test,
+					Status:   ctrf.TestPassed,
+					Duration: duration,
+				})
+			} else if event.Action == "fail" {
+				report.Results.Summary.Tests++
+				report.Results.Summary.Failed++
+				report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
+					Suite:    event.Package,
+					Name:     event.Test,
+					Status:   ctrf.TestFailed,
+					Duration: duration,
+					Message:  getMessagesForTest(testEvents, i, event.Package, event.Test),
+				})
+			} else if event.Action == "skip" {
+				report.Results.Summary.Tests++
+				report.Results.Summary.Skipped++
+				report.Results.Tests = append(report.Results.Tests, &ctrf.TestResult{
+					Suite:    event.Package,
+					Name:     event.Test,
+					Status:   ctrf.TestSkipped,
+					Duration: duration,
+				})
+			}
+		} else {
+			if event.Action == "output" {
+				pc, err := getCoverage(event)
+
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error parsing coverage '%s' : %v\n", event.Output, err)
+					continue
+				}
+
+				if pc != nil {
+					coverage[pc.Suite] = *pc
+				}
+			}
+		}
+	}
+
+	if len(coverage) > 0 {
+		// Convert coverage to a list so its easier to consume
+		coverageList := make([]suiteCoverage, 0, len(coverage))
+
+		for _, v := range coverage {
+			coverageList = append(coverageList, v)
 		}
 
+		report.Results.Summary.Extra = map[string]any{"coverage": coverageList}
 	}
+
 	return report, nil
 }
 func getMessagesForTest(testEvents []TestEvent, index int, packageName, testName string) string {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -139,18 +140,27 @@ func ParseTestResults(r io.Reader, verbose bool, env *ctrf.Environment) (*ctrf.R
 	}
 
 	if len(coverage) > 0 {
-		// Convert coverage to a list so its easier to consume
-		coverageList := make([]suiteCoverage, 0, len(coverage))
-
-		for _, v := range coverage {
-			coverageList = append(coverageList, v)
-		}
-
-		report.Results.Summary.Extra = map[string]any{"coverage": coverageList}
+		addCoverage(report, coverage)
 	}
 
 	return report, nil
 }
+
+func addCoverage(report *ctrf.Report, coverage map[string]suiteCoverage) {
+	// Convert coverage to a list so its easier to consume
+	coverageList := make([]suiteCoverage, 0, len(coverage))
+
+	for _, v := range coverage {
+		coverageList = append(coverageList, v)
+	}
+
+	sort.SliceStable(coverageList, func(i, j int) bool {
+		return strings.Compare(coverageList[i].Suite, coverageList[j].Suite) == -1
+	})
+
+	report.Results.Summary.Extra = map[string]any{"coverage": coverageList}
+}
+
 func getMessagesForTest(testEvents []TestEvent, index int, packageName, testName string) string {
 	var messages []string
 	for i := index; i >= 0; i-- {
